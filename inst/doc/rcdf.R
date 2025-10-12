@@ -5,39 +5,58 @@ knitr::opts_chunk$set(
 )
 
 ## ----eval=FALSE---------------------------------------------------------------
-#  # Install the package from GitHub
-#  devtools::install_github("yng-me/rcdf")
+#  write_rcdf(
+#    data,
+#    path,
+#    pub_key,
+#    ...,
+#    metadata = list(),
+#    ignore_duplicates = TRUE
+#  )
 
 ## ----eval=FALSE---------------------------------------------------------------
 #  library(rcdf)
-
-## ----eval=FALSE---------------------------------------------------------------
-#  write_rcdf(data, path, pub_key, ..., metadata = list())
-
-## ----eval=FALSE---------------------------------------------------------------
 #  # Sample data (list of data frames)
 #  data <- rcdf_list()
 #  data$table1 = data.frame(x = 1:10, y = letters[1:10])
 #  data$table2 = data.frame(a = rnorm(10), b = rnorm(10))
 #  
-#  # Sample public RSA key (for encryption)
-#  pub_key <- file.path(system.file("extdata", package = "rcdf"), "sample-public-key.pem")
+#  # You can generate a new RSA key pair using the following function:
+#  key <- generate_rsa_keys(
+#    path = "path/to/rsa-keys",
+#    password = "1234" # this is optional
+#  )
 #  
 #  # Write the data to an RCDF file
-#  write_rcdf(data = data, path = "path/to/rcdf_file.rcdf", pub_key = pub_key)
+#  write_rcdf(data = data, path = "path/to/rcdf_file.rcdf", pub_key = key)
 
 ## ----eval=FALSE---------------------------------------------------------------
-#  read_rcdf(path, decryption_key, ..., password = NULL, metadata = NULL)
+#  read_rcdf(
+#    path,
+#    decryption_key,
+#    ...,
+#    password = NULL,
+#    metadata = list(),
+#    ignore_duplicates = TRUE,
+#    recursive = FALSE,
+#    return_meta = FALSE
+#  )
 
 ## ----eval=FALSE---------------------------------------------------------------
 #  # Using sample RCDF data
 #  dir <- system.file("extdata", package = "rcdf")
+#  
+#  # mtcars.rcdf is a sample RCDF file included in the package for demonstration purposes only.
 #  rcdf_path <- file.path(dir, 'mtcars.rcdf')
+#  
+#  # This is also a sample key built into the package.
 #  private_key <- file.path(dir, 'sample-private-key.pem')
 #  
 #  rcdf_data <- read_rcdf(path = rcdf_path, decryption_key = private_key)
 #  rcdf_data
 #  
+
+## ----eval=FALSE---------------------------------------------------------------
 #  # Using encrypted/password protected private key
 #  rcdf_path_pw <- file.path(dir, 'mtcars-pw.rcdf')
 #  private_key_pw <- file.path(dir, 'sample-private-key-pw.pem')

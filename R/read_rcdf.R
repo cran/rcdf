@@ -4,11 +4,14 @@
 #' and loads it into R as an RCDF object. The data files within the archive (usually Parquet files) are decrypted and, if provided,
 #' metadata (such as data dictionary and value sets) are applied to the data.
 #'
-#' @param path A string specifying the path to the RCDF archive (zip file).
+#' @param path A string specifying the path to the RCDF archive (zip file). If a directory is provided, all \code{.rcdf} files within that directory will be processed.
 #' @param decryption_key The key used to decrypt the RCDF contents. This can be an RSA or AES key, depending on how the RCDF was encrypted.
 #' @param ... Additional parameters passed to other functions, if needed.
 #' @param password A password used for RSA decryption (optional).
-#' @param metadata An optional metadata object containing data dictionaries and value sets. This metadata is applied to the data if provided.
+#' @param metadata An optional list of metadata object containing data dictionaries, value sets, and primary key constraints for data integrity measure (a \code{data.frame} or \code{tibble} that includes at least two columns: \code{file} and \code{pk_field_name}. This metadata is applied to the data if provided.
+#' @param ignore_duplicates A \code{logical} flag. If \code{TRUE}, a warning is issued when duplicates are found, based on the primary key/s defined during creation of RCDF file. If \code{FALSE}, the function stops with an error.
+#' @param recursive Logical. If \code{TRUE} and \code{path} is a directory, the function will search recursively for \code{.rcdf} files.
+#' @param return_meta Logical. If \code{TRUE}, the metadata will be returned as an attribute of the RCDF object.
 #'
 #' @return An RCDF object, which is a list of Parquet files (one for each record) along with attached metadata.
 #' @export
@@ -35,47 +38,129 @@
 #' rcdf_data_with_pw
 #'
 
-read_rcdf <- function(path, decryption_key, ..., password = NULL, metadata = NULL) {
+read_rcdf <- function(
+  path,
+  decryption_key,
+  ...,
+  password = NULL,
+  metadata = list(),
+  ignore_duplicates = TRUE,
+  recursive = FALSE,
+  return_meta = FALSE
+) {
 
-  meta <- extract_rcdf(path)
-  key <- decrypt_key(data = meta, key = decryption_key, password = password)
+  if(!fs::file_exists(path)) {
+    stop(glue::glue("Specified RCDF file does not exist: {path}"))
+  }
 
-  pq_files <- list.files(
-    path = file.path(meta$dir, 'lineage'),
-    pattern = '\\.parquet',
-    full.names = TRUE
-  )
+  if(fs::is_dir(path)) {
+    rcdf_files <- list.files(path, pattern = "\\.rcdf$", full.names = TRUE, recursive = recursive)
 
-  pq <- list()
+    if(length(rcdf_files) == 0) {
+      stop(glue::glue("No valid RCDF files in the path specified: {path}"))
+    }
+  } else {
+    if(!grepl("\\.rcdf$", path)) {
+      stop(glue::glue("Not a valid RCDF file: {path}"))
+    }
+    rcdf_files <- path
+  }
 
-  for(i in seq_along(pq_files)) {
+  data_dictionary <- metadata$dictionary
 
-    pq_file <- pq_files[i]
-    record <- fs::path_ext_remove(basename(pq_file))
+  conn_duckdb <- DBI::dbConnect(duckdb::duckdb())
 
-    pq_temp <- rcdf::read_parquet(
-      path = pq_file,
-      decryption_key = list(
-        aes_key = key$aes_key,
-        aes_iv = key$aes_iv
-      ),
-      as_arrow_table = FALSE
+  for(i in seq_along(rcdf_files)) {
+
+    rcdf_file <- rcdf_files[i]
+    meta <- extract_rcdf(rcdf_file)
+    key <- decrypt_key(data = meta, key = decryption_key, password = password)
+
+    pq_files <- list.files(
+      path = file.path(meta$dir, 'lineage'),
+      pattern = '\\.parquet',
+      full.names = TRUE
     )
 
-    if(!is.null(metadata)) {
-      pq_temp <- add_metadata(pq_temp, metadata)
+    if(!is.null(meta$dictionary) & is.null(metadata$dictionary)) {
+
+      if(is.null(data_dictionary)) {
+        data_dictionary <- meta$dictionary
+      } else {
+        data_dictionary <- dplyr::bind_rows(data_dictionary, meta$dictionary)
+      }
     }
 
-    pq[[record]] <- arrow::as_arrow_table(pq_temp)
+    pk <- NULL
+    if(!ignore_duplicates) {
+      pk <- metadata$primary_key
+      if(is.null(pk)) { pk <- metadata$primary_keys }
+      if(is.null(pk) & "pk_field_name" %in% names(meta$checksum)) { pk <- meta$checksum }
+    }
+
+    for(j in seq_along(pq_files)) {
+
+      pq_file <- pq_files[j]
+      record <- fs::path_ext_remove(basename(pq_file))
+
+      pk_q <- NULL
+      if(!is.null(pk)) {
+        pk_i <- dplyr::filter(pk, file == record)
+
+        if(nrow(pk_i) > 0) {
+          pk_q <- pk_i$pk_field_name[1]
+        }
+      }
+
+      DBI::dbExecute(conn_duckdb, glue::glue("PRAGMA add_parquet_key('{key$aes_key}', '{key$aes_iv}')"))
+
+      if(DBI::dbExistsTable(conn_duckdb, record)) {
+
+        DBI::dbExecute(conn_duckdb, glue::glue("CREATE TABLE {record}_temp AS SELECT * FROM read_parquet('{pq_file}', encryption_config = {{ footer_key: '{key$aes_key}' }});"))
+        if(!is.null(pk_q)) { DBI::dbExecute(conn_duckdb, "ALTER TABLE {record}_temp ADD PRIMARY KEY ({pk_q})") }
+        DBI::dbExecute(conn_duckdb, glue::glue("INSERT INTO {record} (SELECT * FROM {record}_temp);"))
+        DBI::dbExecute(conn_duckdb, glue::glue("DROP TABLE IF EXISTS {record}_temp;"))
+      } else {
+        DBI::dbExecute(conn_duckdb, glue::glue("CREATE TABLE {record} AS SELECT * FROM read_parquet('{pq_file}', encryption_config = {{ footer_key: '{key$aes_key}' }});"))
+        if(!is.null(pk_q)) { DBI::dbExecute(conn_duckdb, "ALTER TABLE {record} ADD PRIMARY KEY ({pk_q})") }
+      }
+    }
+  }
+
+  pq <- rcdf_list()
+  records <- DBI::dbListTables(conn_duckdb)
+
+  for(i in seq_along(records)) {
+
+    record_i <- records[i]
+
+    pq_i <- dplyr::collect(dplyr::tbl(conn_duckdb, record_i))
+    if(nrow(pq_i) == 0) next
+
+    if(length(data_dictionary) > 0) {
+      pq_i <- add_metadata(pq_i, data_dictionary)
+    }
+
+    pq[[record_i]] <- pq_i
 
   }
 
-  attr(pq, 'metadata') <- meta
+  DBI::dbDisconnect(conn_duckdb, shutdown = TRUE)
+  unlink(meta$dir_base, recursive = TRUE, force = TRUE)
 
-  as_rcdf(pq)
+  if(!is.null(data_dictionary) & return_meta) {
+    pq[['__data_dictionary']] <- data_dictionary
+  }
+
+  if(return_meta) {
+    meta$dictionary <- NULL
+    meta$dir <- NULL
+    attr(pq, 'metadata') <- meta
+  }
+
+  return(pq)
 
 }
-
 
 
 extract_rcdf <- function(path, meta_only = FALSE) {
@@ -111,6 +196,7 @@ extract_rcdf <- function(path, meta_only = FALSE) {
   meta <- jsonlite::read_json(file.path(temp_dir_to, 'metadata.json'), simplifyVector = TRUE)
 
   meta$dir <- temp_dir_to
+  meta$dir_base <- file.path(temp_dir, '__rcdf_temp__')
   meta
 
 }
