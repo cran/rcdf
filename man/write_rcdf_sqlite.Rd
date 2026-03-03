@@ -15,7 +15,7 @@ write_rcdf_sqlite(data, path, db_name = "cbms_data", ..., parent_dir = NULL)
 
 \item{...}{Additional arguments passed to \code{DBI::dbWriteTable()}.}
 
-\item{parent_dir}{Optional subdirectory under `path` to store the SQLite file.}
+\item{parent_dir}{Optional subdirectory under \code{path} to store the SQLite file.}
 }
 \value{
 Invisibly returns \code{NULL}. A \code{.db} file is written to disk.
@@ -26,9 +26,9 @@ Writes all tables in the RCDF object to a single SQLite database file.
 \examples{
 dir <- system.file("extdata", package = "rcdf")
 rcdf_path <- file.path(dir, 'mtcars.rcdf')
-private_key <- file.path(dir, 'sample-private-key.pem')
+private_key <- file.path(dir, 'sample-private-key-pw.pem')
 
-rcdf_data <- read_rcdf(path = rcdf_path, decryption_key = private_key)
+rcdf_data <- read_rcdf(path = rcdf_path, decryption_key = private_key, password = '1234')
 temp_dir <- tempdir()
 
 write_rcdf_sqlite(data = rcdf_data, path = temp_dir)
