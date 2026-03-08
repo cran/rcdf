@@ -1,3 +1,15 @@
+# rcdf 0.1.5
+
+### Feature and update
+
+* Added `encrypt_value()` and `decrypt_value()` functions, respectively, to encrypt and decrypt string using RSA.
+* Changed "dot env" (`.env`) reader from `read_env()` to `read_dot_env()`.
+
+### Bug fix
+
+* Fixed bugs not returning metadata attributes using either `read_rcdf()` and `get_rcdf_metadata()`.
+
+
 # rcdf 0.1.4
 
 ### Features
@@ -5,7 +17,7 @@
 * Added `get_attr()` to retrieve attribute/s from RCDF object.
 * Added `read_parquet_tbl()` to read encrypted Parquet file and return as lazy data from DuckDB connection.
 
-### Breaking change:
+### Breaking change
 * Removed `pre_collect` argument in `read_rcdf()`
 
 ### Enhancements

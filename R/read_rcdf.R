@@ -69,7 +69,7 @@ read_rcdf <- function(
     meta_list$created_at <- c(meta_list$created_at, meta$created_at)
     meta_list$version    <- c(meta_list$version, meta$version)
 
-    if (!is.null(meta$area_name)) {
+    if (!is.null(meta$area_names)) {
       meta_list$area_names <- dplyr::bind_rows(
         meta_list$area_names,
         meta$area_name
