@@ -11,6 +11,8 @@
 #' @param ignore_duplicates A \code{logical} flag. If \code{TRUE}, a warning is issued when duplicates are found, based on the primary key/s defined during creation of RCDF file. If \code{FALSE}, the function stops with an error.
 #' @param recursive Logical. If \code{TRUE} and \code{path} is a directory, the function will search recursively for \code{.rcdf} files.
 #' @param return_meta Logical. If \code{TRUE}, the metadata will be returned as an attribute of the RCDF object.
+#' @param lazy Logical. If \code{TRUE}, each dataset is returned as a lazy \code{rcdf_tbl_db} DuckDB-backed table instead of being collected into memory. The underlying DuckDB connection is kept alive; call \code{collect()} on each element when you are ready to materialise. Default is \code{FALSE}.
+#' @param n_threads Integer or \code{NULL}. Number of DuckDB threads to use for reading. \code{NULL} (default) lets DuckDB choose based on available cores.
 #'
 #' @return An RCDF object, which is a list of Parquet files (one for each record) along with attached metadata.
 #' @export
@@ -40,14 +42,16 @@ read_rcdf <- function(
   metadata = list(),
   ignore_duplicates = TRUE,
   recursive = FALSE,
-  return_meta = FALSE
+  return_meta = FALSE,
+  lazy = FALSE,
+  n_threads = NULL
 ) {
 
   rcdf_files <- resolve_rcdf_files(path, recursive)
 
   creds <- normalize_credentials(rcdf_files, decryption_key, password)
 
-  conn <- open_duckdb_connection()
+  conn <- open_duckdb_connection(n_threads = n_threads)
   on.exit(DBI::dbDisconnect(conn, shutdown = TRUE), add = TRUE)
 
   meta_list <- list()
@@ -70,10 +74,30 @@ read_rcdf <- function(
     meta_list$version    <- c(meta_list$version, meta$version)
 
     if (!is.null(meta$area_names)) {
-      meta_list$area_names <- dplyr::bind_rows(
-        meta_list$area_names,
-        meta$area_name
-      )
+      if (is.null(meta_list$area_names)) {
+        meta_list$area_names <- meta$area_names
+      } else {
+        meta_list$area_names <- rbind(meta_list$area_names, meta$area_names)
+      }
+    }
+
+    if (!is.null(meta$meta)) {
+      if (is.null(meta_list$meta)) {
+        meta_list$meta <- meta$meta
+      } else {
+        all_keys <- union(names(meta_list$meta), names(meta$meta))
+        meta_list$meta <- stats::setNames(
+          lapply(all_keys, function(k) {
+            a <- meta_list$meta[[k]]
+            b <- meta$meta[[k]]
+            if (is.null(a)) return(b)
+            if (is.null(b)) return(a)
+            if (is.data.frame(a) && is.data.frame(b)) return(rbind(a, b))
+            b
+          }),
+          all_keys
+        )
+      }
     }
 
     # Dictionary merge
@@ -83,16 +107,19 @@ read_rcdf <- function(
       if (is.null(data_dictionary)) {
         data_dictionary <- meta$dictionary
       } else {
-        data_dictionary <- dplyr::bind_rows(
-          data_dictionary,
-          meta$dictionary
-        )
+        data_dictionary <- rbind(data_dictionary, meta$dictionary)
       }
     }
   }
 
-  # Collect Results
-  pq <- collect_tables(conn, data_dictionary)
+  if (lazy) {
+    # Return lazy DuckDB-backed tables. The connection is kept open; the
+    # caller is responsible for collecting when ready.
+    on.exit(NULL, add = FALSE)  # cancel the auto-disconnect
+    pq <- collect_tables_lazy(conn, data_dictionary)
+  } else {
+    pq <- collect_tables(conn, data_dictionary)
+  }
 
   # Attach Metadata
   if (!is.null(data_dictionary) && return_meta) {

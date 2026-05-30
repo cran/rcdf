@@ -56,7 +56,6 @@ add_metadata <- function(data, metadata, ..., set_data_types = FALSE) {
   column_names <- colnames(data)
   dictionary <- check_metadata_structure(metadata, column_names)
 
-
   if(inherits(data, 'rcdf_tbl_db')) {
 
     attr(data, "metadata") <- metadata
@@ -64,41 +63,38 @@ add_metadata <- function(data, metadata, ..., set_data_types = FALSE) {
   } else {
 
     with_valueset_col <- "valueset" %in% names(dictionary)
-
     variable_names <- dictionary$variable_name
 
-    for(i in seq_along(variable_names)) {
+    # Compute updated columns in one lapply pass (avoids repeated `[[<-` overhead).
+    updated <- lapply(seq_along(variable_names), function(i) {
+      vn <- variable_names[i]
+      if (!(vn %in% column_names)) return(NULL)
 
-      variable_name_i <- variable_names[i]
+      col <- data[[vn]]
+      attr(col, "label") <- dictionary$label[i]
 
-      if(!(variable_name_i %in% column_names)) next
-
-      attr(data[[variable_name_i]], "label") <- dictionary$label[i]
-
-      if(!with_valueset_col) next
-      valueset <- dictionary$valueset[i][[1]]
-
-      if(length(valueset) == 0) next
-
-      labels <- valueset$value
-
-      is_int <- rlang::is_integer(data[[variable_name_i]])
-      if(is_int & !rlang::is_integer(labels) & grepl("^\\d{1,}$", labels[1])) {
-        labels <- as.integer(labels)
+      if (with_valueset_col) {
+        valueset <- dictionary$valueset[i][[1]]
+        if (length(valueset) > 0) {
+          labels <- valueset$value
+          is_int <- is.integer(col)
+          if (is_int && !is.integer(labels) && grepl("^\\d{1,}$", labels[1])) {
+            labels <- as.integer(labels)
+          }
+          if (!is_int && grepl("^\\d{1,}$", col[1]) && is.integer(labels)) {
+            col <- as.integer(col)
+          }
+          names(labels) <- valueset$label
+          col <- haven::labelled(x = col, labels = labels, label = dictionary$label[i])
+        }
       }
+      col
+    })
+    names(updated) <- variable_names
 
-      if(!is_int & grepl("^\\d{1,}$", data[[variable_name_i]][1]) & rlang::is_integer(labels)) {
-        data[[variable_name_i]] <- as.integer(data[[variable_name_i]])
-      }
-
-      names(labels) <- valueset$label
-
-      data[[variable_name_i]] <- haven::labelled(
-        x = data[[variable_name_i]],
-        labels = labels,
-        label = dictionary$label[i]
-      )
-    }
+    # Batch-assign all non-NULL updated columns back to the data frame.
+    valid <- !vapply(updated, is.null, logical(1L))
+    data[variable_names[valid]] <- updated[valid]
   }
 
   return(data)
@@ -110,30 +106,28 @@ check_metadata_structure <- function(data, cols) {
   required_cols <- c("variable_name", "label", "type")
   required_cols_which <- which(required_cols %in% names(data))
 
-  if (length(required_cols_which) > length(required_cols)) {
+  if (length(required_cols_which) != length(required_cols)) {
     stop("Invalid column names specified.")
   }
 
-  data |>
-    dplyr::filter(!is.na(variable_name)) |>
-    dplyr::distinct(variable_name, .keep_all = TRUE) |>
-    convert_to_na() |>
-    dplyr::select(
-      variable_name,
-      label,
-      type,
-      dplyr::any_of(c("input_data", "valueset", "labels"))
-    ) |>
-    dplyr::filter(variable_name %in% cols)
+  data <- data[!is.na(data$variable_name), , drop = FALSE]
+  data <- data[!duplicated(data$variable_name), , drop = FALSE]
+  data <- convert_to_na(data)
+
+  optional_cols <- intersect(names(data), c("input_data", "valueset", "labels"))
+  keep_cols <- c("variable_name", "label", "type", optional_cols)
+  data <- data[, keep_cols, drop = FALSE]
+
+  data[data$variable_name %in% cols, , drop = FALSE]
 }
 
 convert_to_na <- function(data) {
-  data |>
-    dplyr::mutate_if(is.character, stringr::str_trim) |>
-    dplyr::mutate_if(
-      is.character,
-      ~ dplyr::if_else(. == '', NA_character_, stringr::str_squish(.))
-    )
+  chr_cols <- which(vapply(data, is.character, logical(1L)))
+  for (j in chr_cols) {
+    x <- trimws(data[[j]])
+    data[[j]] <- ifelse(x == "", NA_character_, gsub("\\s+", " ", x))
+  }
+  data
 }
 
 read_metadata <- function(path) {
@@ -145,9 +139,17 @@ read_metadata <- function(path) {
   } else if (grepl("\\.csv$", path)) {
     data <- utils::read.csv(path)
   } else if (grepl("\\.xlsx$", path)) {
+    if (!requireNamespace("openxlsx", quietly = TRUE)) {
+      stop('Package "openxlsx" is required to read .xlsx metadata files. Install it with: install.packages("openxlsx")', call. = FALSE)
+    }
     data <- openxlsx::read.xlsx(path)
   } else if (grepl("\\.parquet$", path)) {
-    data <- arrow::open_dataset(path)
+    conn_pq <- open_duckdb_connection()
+    on.exit(DBI::dbDisconnect(conn_pq, shutdown = TRUE), add = TRUE)
+    data <- DBI::dbGetQuery(
+      conn_pq,
+      sprintf("SELECT * FROM read_parquet(%s)", sql_literal(conn_pq, path))
+    )
   }
 
   data
@@ -174,12 +176,12 @@ read_metadata <- function(path) {
 
 get_rcdf_metadata <- function(path, name = NULL, key) {
 
-  if(!fs::file_exists(path)) {
-    stop(glue::glue("Specified RCDF file does not exist: {path}"))
+  if(!file.exists(path)) {
+    stop(paste0("Specified RCDF file does not exist: ", path))
   }
 
   if(!grepl("\\.rcdf$", path)) {
-    stop(glue::glue("Not a valid RCDF file: {path}"))
+    stop(paste0("Not a valid RCDF file: ", path))
   }
 
   ext <- extract_rcdf(path, meta_only = TRUE)
@@ -215,7 +217,7 @@ get_rcdf_metadata <- function(path, name = NULL, key) {
 
 get_attr <- function(rcdf, attr) {
 
-  attr_key <- stringr::str_split_1(attr, "\\.")
+  attr_key <- strsplit(attr, "\\.")[[1]]
 
   if(length(attr_key) > 1) {
     attributes(rcdf)$metadata[[attr_key[1]]][[attr_key[2]]]
@@ -223,5 +225,56 @@ get_attr <- function(rcdf, attr) {
     attributes(rcdf)$metadata[[attr]]
   }
 
+}
+
+#' Read all top-level metadata from an RCDF file
+#'
+#' Extracts and returns the complete metadata JSON stored inside an
+#' \code{.rcdf} archive without decrypting or loading the underlying data.
+#' Useful for inspecting provenance, checksums, encryption parameters, and
+#' embedded data dictionaries without a decryption key.
+#'
+#' @param path Character string. Path to a valid \code{.rcdf} file.
+#'
+#' @returns A named list corresponding to the \code{metadata.json} stored
+#'   inside the archive. Common keys include \code{log_id}, \code{created_at},
+#'   \code{version}, \code{checksum}, \code{dictionary}, and \code{key}.
+#' @export
+#'
+#' @seealso \code{\link{get_rcdf_metadata}} for retrieving a single metadata key,
+#'   \code{\link{get_attr}} for reading metadata attributes attached to an
+#'   in-memory RCDF object.
+#'
+#' @examples
+#' dir <- system.file("extdata", package = "rcdf")
+#' rcdf_path <- file.path(dir, "mtcars.rcdf")
+#'
+#' meta <- get_attrs(rcdf_path)
+#' meta$version
+#' meta$created_at
+get_attrs <- function(path) {
+
+  if(!file.exists(path)) {
+    stop(paste0("Specified RCDF file does not exist: ", path))
+  }
+
+  if(!grepl("\\.rcdf$", path)) {
+    stop(paste0("Not a valid RCDF file: ", path))
+  }
+
+  extracted_dir <- tempfile()
+  dir.create(extracted_dir, recursive = TRUE, showWarnings = FALSE)
+
+  zip::unzip(path, exdir = extracted_dir, junkpaths = TRUE)
+  meta_file <- file.path(extracted_dir, "metadata.json")
+
+  if (!file.exists(meta_file)) {
+    unlink(extracted_dir, recursive = TRUE, force = TRUE)
+    stop("metadata.json not found inside RCDF archive.")
+  }
+
+  meta <- jsonlite::read_json(meta_file, simplifyVector = TRUE)
+  unlink(extracted_dir, recursive = TRUE, force = TRUE)
+  return(meta)
 }
 

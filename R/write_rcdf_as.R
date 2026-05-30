@@ -32,6 +32,18 @@ write_rcdf_as <- function(data, path, formats, ...) {
   valid_formats <- c("csv", "tsv", "json", "parquet", "xlsx", "dta", "sav", "sqlite")
   label_formats <- c("CSV", "TSV", "JSON", "Parquet", "Excel", "Stata", "SPSS", "SQLite")
 
+  # Safe dispatch table — avoids eval(parse()) on user-supplied format names.
+  writer_fns <- list(
+    csv     = write_rcdf_csv,
+    tsv     = write_rcdf_tsv,
+    json    = write_rcdf_json,
+    parquet = write_rcdf_parquet,
+    xlsx    = write_rcdf_xlsx,
+    dta     = write_rcdf_dta,
+    sav     = write_rcdf_sav,
+    sqlite  = write_rcdf_sqlite
+  )
+
   valid_format_args <- which(formats %in% valid_formats)
 
   if(length(valid_format_args) < length(formats)) {
@@ -40,7 +52,7 @@ write_rcdf_as <- function(data, path, formats, ...) {
     n_invalid_s <- ''
     if(n_invalid > 1) { n_invalid_s <- 's' }
 
-    stop(glue::glue('{n_invalid} invalid format{n_invalid_s} found.'))
+    stop(paste0(n_invalid, " invalid format", n_invalid_s, " found."))
 
   }
 
@@ -50,9 +62,7 @@ write_rcdf_as <- function(data, path, formats, ...) {
     data_format <- formats[i]
     label_format <- label_formats[which(valid_formats == data_format)]
 
-    write_rcdf_fn <- eval(parse(text = glue::glue("write_rcdf_{data_format}")))
-
-    write_rcdf_fn(
+    writer_fns[[data_format]](
       data = data,
       path = path,
       ...,
@@ -93,7 +103,7 @@ write_rcdf_as <- function(data, path, formats, ...) {
 
 write_rcdf_csv <- function(data, path, ..., parent_dir = NULL) {
 
-  check_if_rcdf(data)
+  data <- check_if_rcdf(data)
   path <- dir_create_new(path, parent_dir)
 
   records <- names(data)
@@ -104,7 +114,7 @@ write_rcdf_csv <- function(data, path, ..., parent_dir = NULL) {
 
     utils::write.csv(
       x = dplyr::collect(data[[record]]),
-      file = file.path(path, glue::glue("{record}.csv"))
+      file = file.path(path, paste0(record, ".csv"))
     )
   }
 
@@ -139,7 +149,7 @@ write_rcdf_csv <- function(data, path, ..., parent_dir = NULL) {
 
 write_rcdf_tsv <- function(data, path, ..., parent_dir = NULL) {
 
-  check_if_rcdf(data)
+  data <- check_if_rcdf(data)
   path <- dir_create_new(path, parent_dir)
 
   records <- names(data)
@@ -150,7 +160,7 @@ write_rcdf_tsv <- function(data, path, ..., parent_dir = NULL) {
 
     utils::write.table(
       x = dplyr::collect(data[[record]]),
-      file = file.path(path, glue::glue("{record}.txt")),
+      file = file.path(path, paste0(record, ".txt")),
       sep = "\t"
     )
   }
@@ -187,7 +197,7 @@ write_rcdf_tsv <- function(data, path, ..., parent_dir = NULL) {
 
 write_rcdf_json <- function(data, path, ..., parent_dir = NULL) {
 
-  check_if_rcdf(data)
+  data <- check_if_rcdf(data)
   path <- dir_create_new(path, parent_dir)
 
   records <- names(data)
@@ -198,7 +208,7 @@ write_rcdf_json <- function(data, path, ..., parent_dir = NULL) {
 
     jsonlite::write_json(
       x = dplyr::collect(data[[record]]),
-      path = file.path(path, glue::glue("{record}.json")),
+      path = file.path(path, paste0(record, ".json")),
       auto_unbox = TRUE,
       pretty = TRUE
     )
@@ -237,7 +247,11 @@ write_rcdf_json <- function(data, path, ..., parent_dir = NULL) {
 
 write_rcdf_xlsx <- function(data, path, ..., parent_dir = NULL, as_single_file = FALSE, file_name = NULL) {
 
-  check_if_rcdf(data)
+  if (!requireNamespace("openxlsx", quietly = TRUE)) {
+    stop('Package "openxlsx" is required for Excel export. Install it with: install.packages("openxlsx")', call. = FALSE)
+  }
+
+  data <- check_if_rcdf(data)
   path <- dir_create_new(path, parent_dir)
 
   records <- names(data)
@@ -257,7 +271,7 @@ write_rcdf_xlsx <- function(data, path, ..., parent_dir = NULL, as_single_file =
     } else {
       openxlsx::write.xlsx(
         x = dplyr::collect(data[[record]]),
-        file = file.path(path, glue::glue("{record}.xlsx")),
+        file = file.path(path, paste0(record, ".xlsx")),
         ...
       )
     }
@@ -266,11 +280,11 @@ write_rcdf_xlsx <- function(data, path, ..., parent_dir = NULL, as_single_file =
   if(as_single_file) {
 
     file <- "Book 1.xlsx"
-    if(!file_name) {
+    if(!is.null(file_name)) {
       file <- file_name
 
-      if(!grepl('\\.xlsx$')) {
-        file <- paste(file, ".xlsx")
+      if(!grepl('\\.xlsx$', file_name)) {
+        file <- paste0(file, ".xlsx")
       }
     }
 
@@ -308,7 +322,7 @@ write_rcdf_xlsx <- function(data, path, ..., parent_dir = NULL, as_single_file =
 
 write_rcdf_dta <- function(data, path, ..., parent_dir = NULL) {
 
-  check_if_rcdf(data)
+  data <- check_if_rcdf(data)
   path <- dir_create_new(path, parent_dir)
 
   records <- names(data)
@@ -319,7 +333,7 @@ write_rcdf_dta <- function(data, path, ..., parent_dir = NULL) {
 
     haven::write_dta(
       data = dplyr::collect(data[[record]]),
-      path = file.path(path, glue::glue("{record}.dta")),
+      path = file.path(path, paste0(record, ".dta")),
       ...
     )
   }
@@ -356,7 +370,7 @@ write_rcdf_dta <- function(data, path, ..., parent_dir = NULL) {
 
 write_rcdf_sav <- function(data, path, ..., parent_dir = NULL) {
 
-  check_if_rcdf(data)
+  data <- check_if_rcdf(data)
   path <- dir_create_new(path, parent_dir)
 
   records <- names(data)
@@ -367,7 +381,7 @@ write_rcdf_sav <- function(data, path, ..., parent_dir = NULL) {
 
     haven::write_sav(
       data = dplyr::collect(data[[record]]),
-      path = file.path(path, glue::glue("{record}.sav")),
+      path = file.path(path, paste0(record, ".sav")),
       ...
     )
   }
@@ -404,10 +418,14 @@ write_rcdf_sav <- function(data, path, ..., parent_dir = NULL) {
 
 write_rcdf_sqlite <- function(data, path, db_name = "cbms_data", ..., parent_dir = NULL) {
 
-  check_if_rcdf(data)
+  if (!requireNamespace("RSQLite", quietly = TRUE)) {
+    stop('Package "RSQLite" is required for SQLite export. Install it with: install.packages("RSQLite")', call. = FALSE)
+  }
+
+  data <- check_if_rcdf(data)
   path <- dir_create_new(path, parent_dir)
 
-  conn <- DBI::dbConnect(RSQLite::SQLite(), file.path(path, glue::glue("{db_name}.db")))
+  conn <- DBI::dbConnect(RSQLite::SQLite(), file.path(path, paste0(db_name, ".db")))
 
   records <- names(data)
 

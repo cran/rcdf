@@ -90,25 +90,31 @@ generate_rsa_keys <- function(path, ..., password = NULL, which = "public", pref
 
 generate_pw <- function(length = 16, special_chr = TRUE) {
 
-  pw <-c(0:9, rep(letters, 2), rep(LETTERS, 2))
+  pw <- c(0:9, rep(letters, 2), rep(LETTERS, 2))
 
   if(special_chr) {
     pw <- c(pw, "!", "#", "@", "$", "%", "&", "^", "-", "_", "=", "(", ")", "*", "+", "?", "<", ">")
   }
 
-  paste0(sample(pw, length), collapse = "")
+  # Use a cryptographically secure RNG: draw one random byte per character
+  # and use modular reduction to pick an index.
+  n_choices <- length(pw)
+  rand_bytes <- as.integer(openssl::rand_bytes(length))
+  indices <- (rand_bytes %% n_choices) + 1L
+
+  paste0(pw[indices], collapse = "")
 
 }
 
 
 set_class <- function(data, class_name) {
-  class(data) <- c(class(data), class_name)
+  class(data) <- class_name
   return(data)
 }
 
 
 is_rcdf <- function(data) {
-  inherits(data, 'rcdf') & inherits(data, 'list')
+  inherits(data, 'rcdf') && is.list(data)
 }
 
 
@@ -119,6 +125,23 @@ check_if_rcdf <- function(data) {
 
   data
 
+}
+
+
+generate_uuid <- function() {
+  bytes <- as.integer(openssl::rand_bytes(16L))
+  # Set version 4 bits (bits 12-15 of byte 7 = 0100)
+  bytes[7L] <- bitwOr(bitwAnd(bytes[7L], 0x0fL), 0x40L)
+  # Set variant bits (bits 6-7 of byte 9 = 10)
+  bytes[9L] <- bitwOr(bitwAnd(bytes[9L], 0x3fL), 0x80L)
+  hex <- sprintf("%02x", bytes)
+  paste0(
+    paste0(hex[1:4],  collapse = ""), "-",
+    paste0(hex[5:6],  collapse = ""), "-",
+    paste0(hex[7:8],  collapse = ""), "-",
+    paste0(hex[9:10], collapse = ""), "-",
+    paste0(hex[11:16], collapse = "")
+  )
 }
 
 
@@ -134,16 +157,36 @@ raw_to_hex <- function(x) {
 
 
 hex_to_raw <- function(x) {
+  if (!is.character(x) || length(x) != 1L) {
+    stop("hex_to_raw: input must be a single character string.", call. = FALSE)
+  }
+  if (nchar(x) %% 2L != 0L) {
+    stop("hex_to_raw: input must have an even number of characters.", call. = FALSE)
+  }
+  if (!grepl("^[0-9A-Fa-f]*$", x)) {
+    stop("hex_to_raw: input contains non-hexadecimal characters.", call. = FALSE)
+  }
   digits <- strtoi(strsplit(x, "")[[1]], base = 16L)
   as.raw(bitwShiftL(digits[c(TRUE, FALSE)], 4) + digits[c(FALSE, TRUE)])
 }
 
 
+# sql_literal: quote a scalar value for safe interpolation into a DuckDB SQL string.
+# Returns the DBI-quoted character representation.
+sql_literal <- function(conn, x) {
+  as.character(DBI::dbQuoteLiteral(conn, x))
+}
+
+# sql_ident: quote an identifier (table/column name) for safe use in DuckDB SQL.
+sql_ident <- function(conn, x) {
+  as.character(DBI::dbQuoteIdentifier(conn, x))
+}
+
 dir_create_new <- function(path, parent_dir = NULL) {
   if(!is.null(parent_dir)) {
     path <- file.path(path, parent_dir)
   }
-  fs::dir_create(path)
+  dir.create(path, recursive = TRUE, showWarnings = FALSE)
   return(path)
 }
 
@@ -210,7 +253,7 @@ extract_key <- function(meta) {
     }
 
     if(!is.null(value_admin)) {
-      value <- stringr::str_split_i(value_admin, pattern = '>>><<<', i = 1)
+      value <- strsplit(value_admin, ">>><<<", fixed = TRUE)[[1]][1]
     }
 
     return(list(key = key, value = value, legacy = TRUE))
@@ -227,10 +270,13 @@ get_pc_metadata <- function(which) {
   values$pc_os <- tolower(pc[["sysname"]])
   values$pc_user <- pc[["user"]]
   values$pc_effective_user <- pc[["effective_user"]]
-  values$pc_os_release_date <- pc[["version"]] |>
-    stringr::str_extract(":\\s\\w*\\s\\w*\\s\\d{2}\\s\\d{2}:\\d{2}:\\d{2}.*;") |>
-    stringr::str_remove("^:\\s") |>
-    stringr::str_remove(";$")
+  values$pc_os_release_date <- {
+    raw <- pc[["version"]]
+    m <- regexpr(":\\s\\w*\\s\\w*\\s\\d{2}\\s\\d{2}:\\d{2}:\\d{2}.*;", raw, perl = TRUE)
+    extracted <- if (m > 0) regmatches(raw, m) else ""
+    extracted <- sub("^:\\s", "", extracted)
+    sub(";$", "", extracted)
+  }
   values$pc_os_version <- pc[["release"]]
   values$pc_hardware <- pc[["machine"]]
   values$pc_pid <- Sys.getpid()
@@ -257,22 +303,24 @@ normalize_key_value <- function(value) {
 
   } else if (typeof(value) == 'character') {
 
-    if(grepl('^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?$', value)) {
-
-      return(
-        list(
-          key = "key256base64",
-          value = value
-        )
-      )
-
-    } else if (grepl("^(?:[A-Fa-f0-9]{32}|[A-Fa-f0-9]{48}|[A-Fa-f0-9]{64})$", value, ignore.case = TRUE)) {
+    # Check hex before base64: hex chars are a subset of base64-valid characters,
+    # so a pure-hex string of length 32/48/64 would otherwise always match base64 first.
+    if (grepl("^(?:[A-Fa-f0-9]{32}|[A-Fa-f0-9]{48}|[A-Fa-f0-9]{64})$", value, ignore.case = TRUE)) {
 
       key_length <- 8 * nchar(value)
 
       return(
         list(
-          key = glue::glue("key{key_length}"),
+          key = paste0("key", key_length),
+          value = value
+        )
+      )
+
+    } else if(grepl('^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}==)?$', value)) {
+
+      return(
+        list(
+          key = "key256base64",
           value = value
         )
       )
@@ -320,7 +368,7 @@ decrypt_key <- function(data, prv_key, password = NULL) {
     } else {
 
       # Legacy
-      key <- decrypt_info_aes(meta$key, key = list(aes_key = key))
+      key <- decrypt_info_aes(meta$key, key = list(aes_key = prv_key))
       value <- decrypt_info_aes(meta$value, key = list(aes_key = key))
 
     }
@@ -335,12 +383,38 @@ decrypt_key <- function(data, prv_key, password = NULL) {
   )
 }
 
-open_duckdb_connection <- function() {
+open_duckdb_connection <- function(n_threads = NULL) {
+
+  cfg <- list()
+  if (!is.null(n_threads)) {
+    cfg$threads <- as.integer(n_threads)
+  }
 
   conn <- DBI::dbConnect(
     duckdb::duckdb(),
-    config = list(threads = 1)
+    config = cfg
   )
 
   conn
+}
+
+
+# Load the full crypto module needed for AES-encrypted Parquet writes.
+# Tries httpfs first (OpenSSL-backed); falls back to force_mbedtls_unsafe
+# (DuckDB's built-in mbedtls) so that writes succeed even when httpfs is
+# not installed in the current DuckDB distribution.
+load_duckdb_crypto <- function(conn) {
+  loaded <- tryCatch({
+    DBI::dbExecute(conn, "LOAD httpfs")
+    TRUE
+  }, error = function(e) FALSE)
+
+  if (!loaded) {
+    tryCatch(
+      DBI::dbExecute(conn, "SET force_mbedtls_unsafe = 'true'"),
+      error = function(e) NULL
+    )
+  }
+
+  invisible(NULL)
 }
